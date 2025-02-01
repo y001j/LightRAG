@@ -633,9 +633,43 @@ def get_api_key_dependency(api_key: Optional[str]):
     return api_key_auth
 
 
+# 全局变量存储多个LightRAG实例
+rag_instances = {}
+
+def save_collections_info(working_dir: str, collections: dict):
+    """将知识库信息持久化到文件"""
+    collections_file = Path(working_dir) / "collections.json"
+    try:
+        with open(collections_file, "w", encoding="utf-8") as f:
+            json.dump(collections, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving collections info: {str(e)}")
+
+def load_collections_info(working_dir: str) -> dict:
+    """从文件加载知识库信息"""
+    collections_file = Path(working_dir) / "collections.json"
+    
+    # 如果文件不存在，则创建并包含default集合
+    if not collections_file.exists():
+        default_collections = {"default": {}}  # 默认包含default集合
+        try:
+            with open(collections_file, "w", encoding="utf-8") as f:
+                json.dump(default_collections, f, ensure_ascii=False, indent=2)
+            return default_collections
+        except Exception as e:
+            logging.error(f"Error creating default collections file: {str(e)}")
+            return default_collections
+    
+    try:
+        with open(collections_file, "r", encoding="utf-8") as f:
+            collections = json.load(f)
+            return collections
+    except Exception as e:
+        logging.error(f"Error loading collections info: {str(e)}")
+        return {"default": {}}  # 如果加载失败，返回包含default的默认值
+
 def create_app(args):
     # Verify that bindings arer correctly setup
-
     if args.llm_binding not in [
         "lollms",
         "ollama",
@@ -669,6 +703,22 @@ def create_app(args):
 
     # Initialize document manager
     doc_manager = DocumentManager(args.input_dir)
+
+    # 在初始化时加载已有的知识库
+    existing_collections = load_collections_info(args.working_dir)
+    
+    # 确保existing_collections是字典类型
+    if not isinstance(existing_collections, dict):
+        existing_collections = {"default":{}}
+        save_collections_info(args.working_dir, existing_collections)
+    
+    # 确保default集合存在
+    if "default" not in existing_collections:
+        existing_collections["default"] = {}
+        save_collections_info(args.working_dir, existing_collections)
+    
+    # for collection_name in existing_collections.keys:
+    #     init_rag_instance(collection_name)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -796,53 +846,67 @@ def create_app(args):
         ),
     )
 
-    # Initialize RAG
-    if args.llm_binding in ["lollms", "ollama", "openai-ollama"]:
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            llm_model_func=lollms_model_complete
-            if args.llm_binding == "lollms"
-            else ollama_model_complete
-            if args.llm_binding == "ollama"
-            else openai_alike_model_complete,
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            llm_model_max_token_size=args.max_tokens,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_kwargs={
-                "host": args.llm_binding_host,
-                "timeout": args.timeout,
-                "options": {"num_ctx": args.max_tokens},
-                "api_key": args.llm_binding_api_key,
-            }
-            if args.llm_binding == "lollms" or args.llm_binding == "ollama"
-            else {},
-            embedding_func=embedding_func,
-            kv_storage=KV_STORAGE,
-            graph_storage=GRAPH_STORAGE,
-            vector_storage=VECTOR_STORAGE,
-            doc_status_storage=DOC_STATUS_STORAGE,
-        )
-    else:
-        rag = LightRAG(
-            working_dir=args.working_dir,
-            llm_model_func=azure_openai_model_complete
-            if args.llm_binding == "azure_openai"
-            else openai_alike_model_complete,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            llm_model_max_token_size=args.max_tokens,
-            embedding_func=embedding_func,
-            kv_storage=KV_STORAGE,
-            graph_storage=GRAPH_STORAGE,
-            vector_storage=VECTOR_STORAGE,
-            doc_status_storage=DOC_STATUS_STORAGE,
-        )
+    # 初始化RAG实例的函数
+    def init_rag_instance(instance_id: str):
+        if instance_id in rag_instances:
+            return rag_instances[instance_id]
 
-    async def index_file(file_path: Union[str, Path]) -> None:
+        # 根据instance_id创建不同的工作目录
+        instance_working_dir = Path(args.working_dir) / instance_id
+        instance_working_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.llm_binding in ["lollms", "ollama", "openai-ollama"]:
+            rag = LightRAG(
+                working_dir=str(instance_working_dir),
+                llm_model_func=lollms_model_complete
+                if args.llm_binding == "lollms"
+                else ollama_model_complete
+                if args.llm_binding == "ollama"
+                else openai_alike_model_complete,
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                llm_model_max_token_size=args.max_tokens,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                llm_model_kwargs={
+                    "host": args.llm_binding_host,
+                    "timeout": args.timeout,
+                    "options": {"num_ctx": args.max_tokens},
+                    "api_key": args.llm_binding_api_key,
+                }
+                if args.llm_binding == "lollms" or args.llm_binding == "ollama"
+                else {},
+                embedding_func=embedding_func,
+                kv_storage=KV_STORAGE,
+                graph_storage=GRAPH_STORAGE,
+                vector_storage=VECTOR_STORAGE,
+                doc_status_storage=DOC_STATUS_STORAGE,
+            )
+        else:
+            rag = LightRAG(
+                working_dir=str(instance_working_dir),
+                llm_model_func=azure_openai_model_complete
+                if args.llm_binding == "azure_openai"
+                else openai_alike_model_complete,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                llm_model_max_token_size=args.max_tokens,
+                embedding_func=embedding_func,
+                kv_storage=KV_STORAGE,
+                graph_storage=GRAPH_STORAGE,
+                vector_storage=VECTOR_STORAGE,
+                doc_status_storage=DOC_STATUS_STORAGE,
+            )
+        
+        existing_collections[instance_id] = {}
+        save_collections_info(args.working_dir, existing_collections)
+
+        rag_instances[instance_id] = rag
+        return rag
+
+    async def index_file(file_path: Union[str, Path], rag: LightRAG) -> None:
         """Index all files inside the folder with support for multiple file formats
 
         Args:
@@ -955,7 +1019,7 @@ def create_app(args):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/documents/upload", dependencies=[Depends(optional_api_key)])
-    async def upload_to_input_dir(file: UploadFile = File(...)):
+    async def upload_to_input_dir(file: UploadFile = File(...), instance_id: str = "default"):
         """
         Endpoint for uploading a file to the input directory and indexing it.
 
@@ -1002,7 +1066,7 @@ def create_app(args):
     @app.post(
         "/query", response_model=QueryResponse, dependencies=[Depends(optional_api_key)]
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(request: QueryRequest, instance_id: str = "default"):
         """
         Handle a POST request at the /query endpoint to process user queries using RAG capabilities.
 
@@ -1023,6 +1087,7 @@ def create_app(args):
                            with status code 500 and detail containing the exception message.
         """
         try:
+            rag = init_rag_instance(instance_id)
             response = await rag.aquery(
                 request.query,
                 param=QueryParam(
@@ -1049,10 +1114,10 @@ def create_app(args):
                 return QueryResponse(response=result)
         except Exception as e:
             trace_exception(e)
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e), Res=response)
 
     @app.post("/query/stream", dependencies=[Depends(optional_api_key)])
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(request: QueryRequest, instance_id: str = "default"):
         """
         This endpoint performs a retrieval-augmented generation (RAG) query and streams the response.
 
@@ -1064,6 +1129,7 @@ def create_app(args):
             StreamingResponse: A streaming response containing the RAG query results.
         """
         try:
+            rag = init_rag_instance(instance_id)
             response = await rag.aquery(  # Use aquery instead of query, and add await
                 request.query,
                 param=QueryParam(
@@ -1111,7 +1177,7 @@ def create_app(args):
         response_model=InsertResponse,
         dependencies=[Depends(optional_api_key)],
     )
-    async def insert_text(request: InsertTextRequest):
+    async def insert_text(request: InsertTextRequest, instance_id: str = "default"):
         """
         Insert text into the Retrieval-Augmented Generation (RAG) system.
 
@@ -1124,6 +1190,7 @@ def create_app(args):
             InsertResponse: A response object containing the status of the operation, a message, and the number of documents inserted.
         """
         try:
+            rag = init_rag_instance(instance_id)
             await rag.ainsert(request.text)
             return InsertResponse(
                 status="success",
@@ -1138,7 +1205,7 @@ def create_app(args):
         response_model=InsertResponse,
         dependencies=[Depends(optional_api_key)],
     )
-    async def insert_file(file: UploadFile = File(...), description: str = Form(None)):
+    async def insert_file(file: UploadFile = File(...), description: str = Form(None), instance_id: str = "default"):
         """Insert a file directly into the RAG system
 
         Args:
@@ -1152,6 +1219,7 @@ def create_app(args):
             HTTPException: For unsupported file types or processing errors
         """
         try:
+            rag = init_rag_instance(instance_id)
             content = ""
             # Get file extension in lowercase
             ext = Path(file.filename).suffix.lower()
@@ -1243,12 +1311,12 @@ def create_app(args):
         response_model=InsertResponse,
         dependencies=[Depends(optional_api_key)],
     )
-    async def insert_batch(files: List[UploadFile] = File(...)):
+    async def insert_batch(files: List[UploadFile] = File(...), instance_id: str = "default"):
         """Process multiple files in batch mode
 
         Args:
             files: List of files to process
-
+            instance_id: ID of the LightRAG instance to use
         Returns:
             InsertResponse: Status of the batch insertion operation
 
@@ -1313,6 +1381,7 @@ def create_app(args):
                             continue
 
                     if content:
+                        rag = init_rag_instance(instance_id)
                         await rag.ainsert(content)
                         inserted_count += 1
                         logging.info(f"Successfully indexed file: {file.filename}")
@@ -1355,7 +1424,7 @@ def create_app(args):
         response_model=InsertResponse,
         dependencies=[Depends(optional_api_key)],
     )
-    async def clear_documents():
+    async def clear_documents(instance_id: str = "default"):
         """
         Clear all documents from the LightRAG system.
 
@@ -1366,6 +1435,7 @@ def create_app(args):
             InsertResponse: A response object containing the status, message, and the new document count (0 in this case).
         """
         try:
+            rag = init_rag_instance(instance_id)
             rag.text_chunks = []
             rag.entities_vdb = None
             rag.relationships_vdb = None
@@ -1429,7 +1499,7 @@ def create_app(args):
         return query, SearchMode.hybrid
 
     @app.post("/api/generate")
-    async def generate(raw_request: Request, request: OllamaGenerateRequest):
+    async def generate(raw_request: Request, request: OllamaGenerateRequest, instance_id: str = "default"):
         """Handle generate completion requests"""
         try:
             query = request.prompt
@@ -1437,6 +1507,7 @@ def create_app(args):
             prompt_tokens = estimate_tokens(query)
 
             if request.system:
+                rag = init_rag_instance(instance_id)
                 rag.llm_model_kwargs["system_prompt"] = request.system
 
             if request.stream:
@@ -1568,9 +1639,10 @@ def create_app(args):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/chat")
-    async def chat(raw_request: Request, request: OllamaChatRequest):
+    async def chat(raw_request: Request, request: OllamaChatRequest, instance_id: str = "default"):
         """Handle chat completion requests"""
         try:
+            rag = init_rag_instance(instance_id)
             # Get all messages
             messages = request.messages
             if not messages:
@@ -1760,6 +1832,63 @@ def create_app(args):
                 "max_tokens": args.max_tokens,
             },
         }
+
+    @app.post("/collections", dependencies=[Depends(optional_api_key)])
+    async def create_collection(collection_name: str):
+        """
+        创建一个新的知识库集合
+        """
+        try:
+            if collection_name in rag_instances:
+                raise HTTPException(status_code=400, detail="Collection already exists")
+            
+            # 初始化新的RAG实例
+            init_rag_instance(collection_name)
+            
+            # 持久化知识库信息
+            save_collections_info(args.working_dir, list(rag_instances.keys()))
+            
+            return {"status": "success", "message": f"Collection '{collection_name}' created"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/collections/{collection_name}", dependencies=[Depends(optional_api_key)])
+    async def delete_collection(collection_name: str):
+        """
+        删除指定的知识库集合
+        """
+        try:
+            if collection_name not in rag_instances:
+                raise HTTPException(status_code=404, detail="Collection not found")
+            
+            # 删除RAG实例
+            del rag_instances[collection_name]
+            
+            # 删除对应的存储目录
+            instance_dir = Path(args.working_dir) / collection_name
+            if instance_dir.exists():
+                shutil.rmtree(instance_dir)
+            
+            # 持久化更新后的知识库信息
+            save_collections_info(args.working_dir, list(rag_instances.keys()))
+            
+            return {"status": "success", "message": f"Collection '{collection_name}' deleted"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/collections", dependencies=[Depends(optional_api_key)])
+    async def list_collections():
+        """
+        获取所有知识库集合的列表
+        """
+        try:
+            return {
+                "status": "success",
+                "collections": list(existing_collections.keys()),
+                "total_collections": len(existing_collections)
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     # Serve the static files
     static_dir = Path(__file__).parent / "static"
